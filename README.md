@@ -198,7 +198,7 @@ La dissolution repose ici sur le défilement du bruit et sur la variation du mas
 
 Ces paramètres regroupent les réglages de l’effet dans le matériau pour pouvoir créer des variations sans modifier les connexions du graphe.
 
-## 7. Autres expérimentations et travail en cours
+## 5. Autres expérimentations et travail en cours
 
 ### Échantillonner une cubemap
 
