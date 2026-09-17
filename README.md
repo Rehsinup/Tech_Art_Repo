@@ -1,90 +1,83 @@
-# Tech Art sous Unity — shaders, matériaux animés et effets visuels
-
-Ce projet rassemble des expérimentations de rendu sous Unity : shaders écrits en HLSL, matériaux construits avec Shader Graph et prototype d’effet relié à des scripts de jeu. Ce document explique leur fonctionnement et les choix visibles dans les fichiers du dépôt.
-
-Les quatre axes principaux sont l’éclairage, les effets de profondeur et de masquage, la projection triplanaire et les traînées animées. Les nuages procéduraux et le Ground Slash complètent ces recherches.
-
-
-## Environnement
-
-| Élément | Version enregistrée |
-| --- | --- |
-| Unity | 6000.0.58f1 |
-| Universal Render Pipeline | 17.0.4 |
-| Visual Effect Graph | 17.0.4 |
-
-
 ## 1. Construire un matériau éclairé en HLSL
 
-Fichiers principaux : `Assets/Scenes/HLSL/BaseShader.shader` et `TextureShader.shader`.
+Avec ces shaders, ma démarche est de décomposer le rendu d’un matériau pour comprendre le rôle de chaque calcul : comment une texture est appliquée, comment la lumière réagit à la surface et comment ajouter des reflets ou de l’émission. Le HLSL me permet de travailler directement sur ces différentes étapes.
 
-### De la géométrie à la couleur
+### Une base texturée
 
-Le shader de base transforme les positions des sommets vers l’espace utilisé pour l’affichage avec `TransformObjectToHClip`. Il transmet également les UV, après application du tiling et de l’offset du matériau.
+Dans `BaseShader.shader`, je transforme les positions des sommets avec `TransformObjectToHClip`, puis je transmets les UV au fragment shader. J’applique le tiling et l’offset du matériau pour pouvoir ajuster la répétition et le placement de la texture.
 
-Le fragment shader échantillonne ensuite une texture et la multiplie par une couleur :
+La couleur de départ est simplement la texture multipliée par une teinte :
 
 ```hlsl
 float4 textureSample = tex2D(_BaseTex, i.uv);
 return textureSample * _BaseColor;
 ```
 
-Cette base sépare la forme du modèle, les coordonnées de texture et la teinte du matériau. `TextureShader.shader` y ajoute plusieurs composantes d’éclairage.
+Cette base me donne un point de départ simple pour isoler les contributions que j’utilise dans `TextureShader.shader`.
 
 ### Éclairage diffus et ambiant
 
-Le diffus utilise le produit scalaire entre la normale de la surface et la direction de la lumière principale. Une surface orientée vers la lumière reçoit une contribution plus forte ; une surface tournée à l’opposé reçoit une contribution directe nulle.
+Pour le diffus, j’utilise le produit scalaire entre la normale de la surface et la direction de la lumière principale. Plus la surface fait face à la lumière, plus sa contribution est forte. Je limite le résultat à zéro pour éviter une contribution négative sur les faces opposées.
 
 ```hlsl
 float3 diffuse = mainLight.color * max(0, dot(i.normalWS, mainLight.direction));
 float3 ambient = SampleSH(i.normalWS);
 ```
 
-La contribution ambiante est ajoutée au diffus. Dans ce code, la couleur texturée est multipliée par cette somme. La lumière principale est récupérée, mais ce calcul ne multiplie pas explicitement le diffus par son atténuation d’ombre.
+J’ajoute une contribution ambiante avec `SampleSH`, puis je multiplie la couleur texturée par la somme du diffus et de l’ambiant. Cette séparation me permet de comprendre ce qui vient de la lumière directe et ce qui vient de l’environnement lumineux.
 
-### Reflet spéculaire
+### Reflet spéculaire et Fresnel
 
-Le reflet repose sur un demi-vecteur : la direction intermédiaire entre la lumière et la vue. Le produit scalaire avec la normale est élevé à la puissance `_GlossPower`.
+Pour le reflet spéculaire, je calcule un demi-vecteur entre la direction de la lumière et celle de la caméra :
 
 ```hlsl
 float3 halfVector = normalize(mainLight.direction + i.viewWS);
 float specular = pow(max(0, dot(i.normalWS, halfVector)), _GlossPower);
 ```
 
-Une puissance plus grande resserre le reflet. La valeur par défaut est `400`.
+J’expose `_GlossPower` pour contrôler la concentration du reflet. Une valeur élevée donne un reflet plus resserré.
 
-### Fresnel et émission
-
-Le terme Fresnel augmente lorsque la surface est vue sous un angle rasant :
+J’utilise également un terme Fresnel pour accentuer les surfaces vues sous un angle rasant :
 
 ```hlsl
 float fresnel = pow(1.0f - max(0, dot(i.normalWS, i.viewWS)), _FresnelPower);
 ```
 
-Dans cette implémentation, ce terme est multiplié par le diffus avant d’être ajouté à la contribution spéculaire. L’accentuation des bords dépend donc aussi de l’éclairage direct.
+Dans mon implémentation, ce terme est multiplié par le diffus. L’accentuation des bords reste donc liée à l’éclairage direct. `_FresnelPower` me permet de régler la répartition de cet effet.
 
-Une variante activée par `ENABLE_EMSSIVE` ajoute `_EmissiveColor`. L’émission est ici une couleur ajoutée au résultat ; un halo lumineux à l’écran dépendrait aussi du post-traitement de la scène.
+### Émission
 
-### Découpage de l’alpha et dithering
+J’ai prévu une variante activable avec `ENABLE_EMSSIVE`, qui ajoute `_EmissiveColor` au résultat. Cela me permet de contrôler une contribution colorée indépendante du calcul diffus.
 
-Le shader contient une grille de 16 seuils répétée en motif 4 × 4. Selon la position du pixel, l’alpha est comparé à un seuil différent. Les fragments rejetés produisent un motif de découpage, utilisable pour donner une impression de transparence sans mélange alpha classique.
+Cette addition agit sur la couleur du matériau. Pour obtenir un halo autour des zones lumineuses, il faut aussi un post-traitement adapté, comme le bloom.
 
+### Alpha clipping et dithering
 
-### Transparence configurable
+J’explore deux façons de découper le matériau. La première supprime les fragments dont l’alpha est inférieur à `_ClipThreshold`. La seconde utilise une matrice de 16 seuils répétée en motif 4 × 4 : chaque fragment est conservé ou supprimé selon son alpha et sa position dans le motif.
 
-`TransparentShader.shader` isole une autre approche : les facteurs source et destination du mélange sont exposés dans le matériau et utilisés par `Blend [_SrcBlend] [_DstBlend]`.
+L’intérêt du dithering est de répartir les fragments visibles pour produire une impression de transparence par découpage. Les deux tests sont présents dans le shader actuel.
 
-Le réglage par défaut vaut `1 / 1`, ce qui correspond à un mélange additif. La présence du shader permet d’expérimenter les facteurs de mélange ; elle ne signifie pas que tous les matériaux du projet utilisent une transparence alpha standard.
+Cette partie reste à ajuster : mon appel à `ComputeScreenPos` utilise actuellement la position objet, alors que les coordonnées nécessaires au motif écran doivent être calculées à partir de la position projetée.
+
+### Tester les modes de transparence
+
+Dans `TransparentShader.shader`, j’expose les facteurs de mélange source et destination :
+
+```hlsl
+Blend [_SrcBlend] [_DstBlend]
+```
+
+Cela me permet de modifier la manière dont la couleur du matériau se combine avec ce qui est déjà affiché. Le réglage par défaut est additif (`One / One`).
+
+L’ensemble reste un terrain d’expérimentation : le calcul diffus de `TextureShader.shader`, par exemple, n’applique pas encore explicitement l’atténuation des ombres de la lumière principale.
 
 ## 2. Utiliser la profondeur et le stencil
 
-### Faire apparaître une intersection
+Avec ces effets, je travaille sur la visibilité des surfaces : faire ressortir une intersection, afficher une partie masquée ou limiter un matériau à une zone précise. La profondeur et le stencil permettent de piloter ces comportements directement pendant le rendu.
 
-Fichier : `Assets/Scenes/HLSL/Intersection.shader`.
+### Faire ressortir les intersections
 
-Le shader lit la texture de profondeur de la scène avec `SampleSceneDepth`, puis convertit cette valeur avec `LinearEyeDepth`. Il la compare à la profondeur du fragment portée par `positionSS.w`.
-
-Le masque de contact est calculé ainsi :
+Dans `Intersection.shader`, je lis la profondeur de la scène avec `SampleSceneDepth`, puis je la convertis avec `LinearEyeDepth`. Je compare cette profondeur à celle du fragment pour construire un masque de proximité.
 
 ```hlsl
 float intersectAmount = sceneEyeDepth - i.positionSS.w;
@@ -93,40 +86,40 @@ intersectAmount = pow(intersectAmount, _IntersectionPower);
 return lerp(_BaseColor, _IntersectionColor, intersectAmount);
 ```
 
-Lorsque les profondeurs sont proches, la couleur d’intersection prend davantage de place. `_IntersectionPower` ajuste le profil de la transition. Ce mécanisme sert de base à une coloration de contact entre deux surfaces.
+Lorsque les profondeurs sont proches, le shader privilégie `_IntersectionColor`. `_IntersectionPower` règle la transition entre cette couleur et `_BaseColor`.
 
-Il dépend de la texture de profondeur et doit être contrôlé avec la caméra utilisée. Les assets de pipeline du dépôt n’activent pas tous cette texture. Le shader porte aussi des tags de transparence, mais ne déclare pas de mélange `Blend` : ces tags seuls ne rendent pas sa couleur semi-transparente.
+L’objectif est de faire apparaître visuellement les zones de contact entre surfaces à partir des informations de profondeur. Cette approche dépend de la texture de profondeur fournie par la caméra et le pipeline. Le shader actuel possède des tags de transparence, mais pas de commande `Blend` : la semi-transparence reste donc à configurer si je veux l’utiliser.
 
-### Afficher les parties masquées : X-ray
+### Afficher les parties cachées avec un effet X-ray
 
-Fichier : `Assets/Scenes/HLSL/Xray.shader`.
-
-L’effet repose sur deux états de rendu :
+Dans `Xray.shader`, j’utilise :
 
 ```hlsl
 ZTest Greater
 ZWrite Off
 ```
 
-Le test laisse passer les fragments situés derrière une profondeur déjà écrite. Le shader les colore avec `_BaseColor`, sans modifier lui-même le tampon de profondeur.
+Le test de profondeur conserve les fragments situés derrière une profondeur déjà écrite, puis je leur applique `_BaseColor`. Je désactive l’écriture de profondeur pour que cette passe ne remplace pas les informations déjà présentes.
 
-Cela constitue la base d’un effet de silhouette derrière un obstacle. Le résultat dépend de l’ordre de rendu : les surfaces qui masquent l’objet doivent avoir écrit leur profondeur avant cette passe.
+C’est une base pour révéler la silhouette d’un objet derrière un obstacle. Le fonctionnement dépend aussi de l’ordre de rendu : l’obstacle doit avoir écrit sa profondeur avant le passage de l’effet.
 
-### Délimiter une zone avec le stencil
+### Masquer une zone avec le stencil
 
-Fichiers : `StencilMask.shader` et `StencilTexture.shader` dans `Assets/Scenes/HLSL`.
+J’ai séparé cette expérimentation en deux shaders : `StencilMask.shader` et `StencilTexture.shader`.
 
-Le premier shader écrit une valeur `_StencilRef` dans le stencil avec `Comp Always` et `Pass Replace`. Sa file `Geometry-1` le place avant les objets de la file géométrique standard.
+Le premier écrit une référence dans le stencil avec `Comp Always` et `Pass Replace`. Je le place dans la file `Geometry-1` pour qu’il passe avant la géométrie standard.
 
-Le second utilise `Comp Equal` : il affiche sa texture uniquement là où la valeur du stencil correspond à sa référence.
+Le second utilise `Comp Equal` et n’affiche sa texture que là où la référence correspond.
 
-Le principe peut servir à découper une fenêtre de visibilité ou à révéler un matériau dans une zone précise. Dans l’état actuel, le shader de masque désactive l’écriture de profondeur mais n’inclut pas `ColorMask 0` ; son invisibilité dans le rendu couleur n’est donc pas explicitement garantie par le code.
+Cette séparation me permet de définir une forme de masque d’un côté et le contenu visible de l’autre. Elle peut servir de base à une fenêtre de visibilité ou à un effet de révélation localisé. Il reste à finaliser le comportement couleur du masque : `ZWrite Off` désactive son écriture de profondeur, mais je n’ai pas encore ajouté `ColorMask 0` pour empêcher explicitement son écriture dans le rendu couleur.
 
-## 3. Texturer sans dépendre des UV : projection triplanaire
+## 3. Texturer avec une projection triplanaire
 
-Fichier : `Assets/Scenes/HLSL/Triplanar.shader`.
+Avec `Triplanar.shader`, j’explore une manière d’appliquer une texture sans utiliser les UV du modèle. Le principe est de projeter la même texture selon trois axes, puis de mélanger ces projections en fonction de l’orientation de la surface.
 
-La projection triplanaire échantillonne une même texture selon trois orientations. Les coordonnées viennent de la position dans le monde :
+### Construire les trois projections
+
+J’utilise la position en espace monde pour obtenir trois jeux de coordonnées :
 
 ```hlsl
 float2 xAxisUV = i.positionWS.zy * _Tile;
@@ -134,143 +127,93 @@ float2 yAxisUV = i.positionWS.xz * _Tile;
 float2 zAxisUV = i.positionWS.xy * _Tile;
 ```
 
-Le shader calcule ensuite le poids de chaque projection à partir de la normale :
+Chaque paire de composantes correspond à une projection. `_Tile` me permet de contrôler la répétition de la texture.
+
+### Mélanger selon les normales
+
+Je calcule les poids à partir des composantes absolues de la normale, puis je les normalise pour que leur somme soit égale à un :
 
 ```hlsl
 float3 weights = pow(abs(i.normalWS), _BlendPower);
 weights *= rcp(weights.x + weights.y + weights.z);
 ```
 
-La couleur finale est la somme des trois textures pondérées. Une face principalement orientée vers un axe utilise surtout la projection correspondante ; les orientations intermédiaires mélangent les projections.
+Je multiplie ensuite chaque échantillon de texture par son poids avant de les additionner. Une face orientée principalement vers un axe utilise surtout la projection associée. Les zones intermédiaires combinent plusieurs projections.
 
-| Paramètre | Effet |
-| --- | --- |
-| `_Tile` | Modifie la répétition de la texture dans l’espace monde. |
-| `_BlendPower` | Contrôle la netteté de la transition entre les projections. |
+J’expose `_BlendPower` pour ajuster la transition : une valeur plus élevée renforce la projection dominante et rend le mélange plus net.
 
-Cette méthode est utile pour texturer un modèle sans utiliser ses UV. Elle demande trois échantillonnages de texture. Comme la projection est ancrée dans le monde, déplacer le modèle change aussi la portion de texture qu’il traverse.
+Cette approche permet de se passer du dépliage UV pour ce matériau, au prix de trois échantillonnages de texture. Comme les coordonnées sont prises dans le monde, la projection reste ancrée dans cet espace : déplacer le modèle change la portion de texture qu’il traverse.
 
-Le shader expose `_BaseColor`, mais ne l’utilise actuellement pas dans la couleur retournée.
+Le paramètre `_BaseColor` est présent dans le shader, mais je ne l’utilise pas encore dans la couleur finale.
 
-## 4. Construire des traînées animées avec Shader Graph
+## 4. Construire une traînée animée avec Shader Graph
 
-Fichiers : `Assets/Trails/Trails.shadergraph` et `LoveMachineTest.shadergraph`.
+Dans `Trails.shadergraph`, je combine une texture défilante, un bruit animé et un dégradé de couleur. L’objectif est de contrôler séparément le mouvement du motif, la variation de son opacité et sa couleur le long de la traînée.
 
-Ces graphes combinent une texture défilante, un bruit animé et un dégradé de couleur. Ils produisent le matériau de l’effet ; ils ne créent pas à eux seuls la géométrie d’une traînée.
+Le graphe définit le matériau de l’effet. La forme de la traînée dépend de la géométrie sur laquelle il est appliqué et de ses UV.
 
-### Deux animations indépendantes
+### Animer la texture et le bruit séparément
 
-La texture principale reçoit un offset calculé avec le temps et `MainTexSpeed`. Le bruit reçoit un autre offset calculé avec `DissolveSpeed`.
+Pour faire défiler la texture principale, je multiplie le temps par `MainTexSpeed`, puis j’envoie le résultat dans l’offset des UV.
+
+J’utilise une deuxième chaîne pour le bruit : le temps est multiplié par `DissolveSpeed`, puis appliqué aux coordonnées d’un `Simple Noise`.
 
 ```text
-Temps × MainTexSpeed  → offset des UV → texture principale
-Temps × DissolveSpeed → offset des UV → Simple Noise
+Temps × MainTexSpeed  → déplacement des UV → texture principale
+Temps × DissolveSpeed → déplacement des UV → bruit
 ```
 
-Les deux mouvements peuvent donc être réglés séparément. `DissolveScale` contrôle l’échelle du bruit.
+Ces deux vitesses indépendantes me permettent de régler le mouvement de la texture sans imposer le même mouvement au masque. `DissolveScale` contrôle l’échelle du bruit.
 
-### Un dégradé le long de l’effet
+### Répartir les couleurs le long de la traînée
 
-La composante U des UV alimente le facteur d’un `Lerp` entre `Color1` et `Color2`. La couleur évolue ainsi le long d’un axe de la géométrie, selon ses UV.
+Je récupère la composante U des UV pour piloter un `Lerp` entre `Color1` et `Color2`. Le dégradé suit ainsi un axe de la géométrie.
 
-Le résultat est multiplié par la texture et le masque, puis envoyé à `Base Color`. Les graphes contiennent un bloc `Emission`, mais les connexions inspectées n’y relient pas cette chaîne de calcul.
+Je multiplie ce dégradé par la texture masquée, puis j’envoie le résultat dans `Base Color`. La chaîne de couleur n’est actuellement pas connectée à l’émission.
 
-### Un masque de dissolution renforcé par les UV
+### Atténuer une extrémité avec un masque
 
-Dans `LoveMachineTest`, le bruit est directement multiplié par la texture.
-
-`Trails` ajoute un traitement spatial : une composante U passe par `One Minus`, est ajoutée au bruit, puis cette même composante U est soustraite. Le masque avant multiplication par la texture peut donc se résumer à :
+Pour faire varier le masque le long de la traînée, je combine le bruit avec U. Le graphe utilise `One Minus`, une addition et une soustraction, ce qui correspond à :
 
 ```text
 masque = bruit + (1 − U) − U
        = bruit + 1 − 2U
 ```
 
-Ce calcul favorise une extrémité et atténue l’autre. La texture multiplie ensuite le masque ; une conversion vers la sortie scalaire et un `Clamp` entre 0 et 1 alimentent l’alpha. Les graphes utilisent une surface transparente avec l’alpha clipping activé.
+Le masque favorise une extrémité et atténue progressivement l’autre, tandis que le bruit ajoute des variations animées.
 
-Il s’agit d’un masque animé par défilement du bruit et modulé dans l’espace. Aucun paramètre dédié de progression globale de dissolution n’est exposé dans ces graphes.
+Je multiplie ensuite ce masque par la texture. Le résultat sert à moduler la couleur et passe également par un `Clamp` entre 0 et 1 pour alimenter l’alpha. Le matériau utilise une surface transparente avec l’alpha clipping activé.
 
-```mermaid
-flowchart LR
-    A[Texture avec UV animés] --> D[Texture multipliée par le masque]
-    B[Bruit animé] --> C[Masque modulé par U]
-    C --> D
-    D --> E[Clamp puis Alpha]
-    D --> F[Multiplication par le dégradé]
-    G[Color1 vers Color2 selon U] --> F
-    F --> H[Base Color]
-```
+La dissolution repose ici sur le défilement du bruit et sur la variation du masque dans les UV. Je n’ai pas encore exposé de paramètre unique permettant de piloter une disparition complète de l’effet de 0 à 1.
 
-| Propriété | Rôle |
+### Paramètres du matériau
+
+| Paramètre | Utilisation |
 | --- | --- |
-| `MainTex` | Motif principal de l’effet. |
-| `MainTexSpeed` | Direction et vitesse du défilement de la texture. |
-| `DissolveSpeed` | Direction et vitesse du défilement du bruit. |
-| `DissolveScale` | Échelle du bruit. |
-| `Color1`, `Color2` | Couleurs du dégradé piloté par U. |
+| `MainTex` | Choisir le motif principal. |
+| `MainTexSpeed` | Régler la direction et la vitesse de la texture. |
+| `DissolveSpeed` | Régler la direction et la vitesse du bruit. |
+| `DissolveScale` | Modifier l’échelle du bruit. |
+| `Color1` et `Color2` | Définir les couleurs du dégradé. |
 
-## 5. Nuages procéduraux et déplacement des sommets
+Ces paramètres regroupent les réglages de l’effet dans le matériau pour pouvoir créer des variations sans modifier les connexions du graphe.
 
-Fichier : `Assets/Shaders/Clouds.shadergraph`.
+## 7. Autres expérimentations et travail en cours
 
-Le graphe utilise la position pour construire les coordonnées d’un `Gradient Noise`. Un nœud `Rotate About Axis` transforme cette projection, puis `Tiling And Offset` la fait défiler avec `Time × NoiseSpeed`.
+### Échantillonner une cubemap
 
-Le bruit suit deux branches :
+Avec `CubemapShader.shader`, j’explore l’utilisation d’une texture cubique. Je transforme la normale en espace monde, puis je m’en sers comme direction pour échantillonner la cubemap.
 
-- Il multiplie une couleur constante pour alimenter `Base Color`.
-- Il multiplie la normale, puis une amplitude, avant d’être ajouté à la position des sommets.
+Cette approche me permet d’associer une couleur à l’orientation de la surface. Le shader ne calcule pas encore un vecteur de réflexion dépendant de la caméra : il s’agit d’une première exploration de l’échantillonnage d’une cubemap.
 
-La seconde branche correspond au principe suivant :
+### Construire un shader PBR
 
-```text
-position finale = position initiale + normale × bruit × amplitude
-```
+Dans `PBR.shader`, ma démarche est de relier les propriétés du matériau au modèle d’éclairage d’URP. Je prépare une structure `SurfaceData` pour les caractéristiques de la surface et une structure `InputData` pour les informations nécessaires à son éclairage, puis j’appelle `UniversalFragmentPBR`.
 
-L’entrée du nœud d’amplitude est enregistrée à `2`. Le déplacement est donc bien présent dans la chaîne du graphe. Sa finesse dépend notamment du nombre de sommets du maillage.
+Le shader prévoit des entrées pour la couleur de base, le métallique, la douceur de surface, les normales, l’émission et l’occlusion ambiante. Cette organisation permet de séparer les données du matériau des informations liées à sa position, à son orientation et à la vue.
 
-`Noise Scale` et `NoiseSpeed` sont exposés. `RotateProjection` sert à la fois d’axe de rotation et, via sa première composante, de valeur de rotation : ces contrôles ne sont pas indépendants dans le graphe actuel.
+Cette partie est encore en cours. Les calculs du métallique, de la douceur et des normales utilisent actuellement `_BaseTex` au lieu de leurs textures dédiées. La branche de lightmap dynamique contient également `bakedGO` à la place de `bakedGI`. Ces points doivent être corrigés avant de considérer ce shader comme finalisé.
 
-La cible du graphe est Unlit. Cette construction décrit un matériau procédural appliqué à une surface, sans simulation volumétrique de nuages.
+### Préparer un matériau de bouclier
 
-## 6. Relier un effet à un prototype de jeu : Ground Slash
-
-Fichiers principaux dans `Assets/GroundSlash` : `Ground Slash Shooter.cs`, `GroundSlash.cs`, `FirstPersonControllerScript.cs` et `GroundSlash.vfx`.
-
-### Déclenchement et direction
-
-Le script de tir surveille `Fire1`. Une temporisation limite la fréquence avec `1 / fireRate` ; la valeur par défaut est de quatre tirs par seconde.
-
-Un rayon part du centre de la caméra. Le code choisit un point à 1 000 unités sur ce rayon, puis instancie le projectile à `firePoint`. Ce point n’est pas obtenu par une collision avec un obstacle.
-
-Le projectile reçoit une orientation vers la destination, puis une vitesse de Rigidbody fondée sur la direction avant du tireur et la propriété `speed` du projectile.
-
-### Positionnement au sol et durée de vie
-
-`GroundSlash.cs` replace initialement le projectile à `Y = 0`. Dans `FixedUpdate`, un raycast vers le bas tente ensuite de récupérer la hauteur du sol ; en cas d’échec, le projectile revient à `Y = 0`.
-
-La destruction est programmée après `destroyDelay`, soit cinq secondes par défaut. Une coroutine contient également une logique de ralentissement.
-
-Le dossier comprend un VFX Graph avec les contextes de génération, d’initialisation et de mise à jour des particules, ainsi qu’une scène de test. Leur présence documente le travail sur l’effet ; l’assemblage complet doit être vérifié dans Unity.
-
-### Limites actuelles du prototype
-
-- Le ralentissement démarre avec `t = 1`, puis utilise `Lerp(Vector3.zero, vitesse, 1 - t)`. La première itération ramène donc immédiatement la vitesse à zéro.
-- La direction de vitesse utilise `transform.forward` du tireur, tandis que l’orientation du projectile est calculée séparément vers la destination.
-- Le code tente de limiter la rotation à Y en modifiant directement des composantes du quaternion ; ce n’est pas une méthode fiable pour supprimer le tangage et le roulis.
-- Le raycast démarre une unité au-dessus du projectile, avec une portée par défaut de `0.1`. Ces valeurs ne suffisent pas à atteindre un sol situé une unité plus bas, sauf réglage différent dans la scène.
-
-Ces points situent le Ground Slash comme un prototype dont le comportement reste à stabiliser.
-
-## 7. Autres expérimentations et état du projet
-
-`CubemapShader.shader` échantillonne une cubemap à partir de la normale en espace monde. Il explore l’utilisation d’une texture cubique ; il ne calcule pas un vecteur de réflexion dépendant de la caméra.
-
-`PBR.shader` prépare des structures `SurfaceData` et `InputData`, puis appelle `UniversalFragmentPBR`. Il expose notamment des textures pour le métallique, la douceur, les normales, l’émission et l’occlusion. Plusieurs branchements restent à corriger : les calculs du métallique, de la douceur et des normales échantillonnent actuellement `_BaseTex`. La branche de lightmap dynamique contient aussi `bakedGO` à la place de `bakedGI`. Ce shader doit donc être présenté comme un travail en cours.
-
-`Shield.shadergraph` contient les blocs de sortie d’un matériau Lit, sans réseau d’effet connecté. Il s’agit à ce stade d’une base de matériau.
-
-## Explorer le dépôt
-
-Les scènes `Assets/Scenes/HLSL/HLSL.unity` et `Assets/GroundSlash/Slash.unity` constituent des points d’entrée pour examiner les expérimentations correspondantes. Les matériaux et les graphes permettent ensuite de retrouver les paramètres détaillés ci-dessus.
-
-Les captures et démonstrations vidéo restent à ajouter après vérification dans Unity. Elles permettront de comparer les réglages, de montrer le mouvement des effets et d’illustrer les limites des prototypes avec leur rendu réel.
+`Shield.shadergraph` est pour le moment une base de matériau Lit. Les blocs de sortie sont présents, mais aucun réseau de nœuds ne construit encore l’effet de bouclier. Je le garde donc comme une expérimentation à développer.
