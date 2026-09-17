@@ -13,7 +13,6 @@ Les quatre axes principaux sont l’éclairage, les effets de profondeur et de m
 | Universal Render Pipeline | 17.0.4 |
 | Visual Effect Graph | 17.0.4 |
 
-Le HLSL permet de détailler les calculs d’éclairage et les règles de rendu. Shader Graph sert à assembler les textures, les bruits et les animations sous forme de graphes. Les scripts C# apportent le déplacement, les commandes et le cycle de vie du prototype de projectile.
 
 ## 1. Construire un matériau éclairé en HLSL
 
