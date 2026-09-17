@@ -69,9 +69,6 @@ Une variante activée par `ENABLE_EMSSIVE` ajoute `_EmissiveColor`. L’émissio
 
 Le shader contient une grille de 16 seuils répétée en motif 4 × 4. Selon la position du pixel, l’alpha est comparé à un seuil différent. Les fragments rejetés produisent un motif de découpage, utilisable pour donner une impression de transparence sans mélange alpha classique.
 
-Un second test rejette les fragments dont l’alpha est inférieur à `_ClipThreshold`. Les deux mécanismes sont donc présents en même temps.
-
-La partie dithering reste à vérifier : le code appelle actuellement `ComputeScreenPos` avec la position objet, alors que ce calcul doit s’appuyer sur la position projetée pour obtenir les coordonnées écran attendues.
 
 ### Transparence configurable
 
