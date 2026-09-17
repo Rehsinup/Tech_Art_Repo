@@ -4,7 +4,6 @@ Ce projet rassemble des expérimentations de rendu sous Unity : shaders écrits 
 
 Les quatre axes principaux sont l’éclairage, les effets de profondeur et de masquage, la projection triplanaire et les traînées animées. Les nuages procéduraux et le Ground Slash complètent ces recherches.
 
-> État documenté : commit `ab7f22d`, du 31 janvier 2026. Le projet a été ajouté en un seul import après un premier commit contenant le `.gitignore`. Les sections ci-dessous décrivent sa construction technique, sans prétendre reconstituer l’ordre chronologique du développement. Les rendus et la compilation n’ont pas été vérifiés dans Unity pour cette documentation.
 
 ## Environnement
 
